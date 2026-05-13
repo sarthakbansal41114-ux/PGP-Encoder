@@ -9,12 +9,15 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-# --- 64-BIT CUSTOM BASE-64 ALPHABET ---
-STD_B64    = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-CUSTOM_B64 = "ULKITARPGulkitarpgBCDEFHJMNOQSVWXYZbcdefhjmnoqsvwxyz0123456789+/"
+# --- 32-BIT PURE CUSTOM ALPHABET ---
+# Standard Base32 uses A-Z and 2-7 (32 characters)
+STD_B32    = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 
-ENCODE_TRANS = str.maketrans(STD_B64, CUSTOM_B64)
-DECODE_TRANS = str.maketrans(CUSTOM_B64, STD_B64)
+# Your Custom 32-Letter Alphabet (Exactly 32 characters)
+CUSTOM_B32 = "PULKITARGNOSpulkitargnos1062JEje"
+
+ENCODE_TRANS = str.maketrans(STD_B32, CUSTOM_B32)
+DECODE_TRANS = str.maketrans(CUSTOM_B32, STD_B32)
 
 CHUNK_SIZE = 1024 * 1024 
 
@@ -36,22 +39,18 @@ def encode_data(file_bytes: bytes, filename: str, password: str) -> str:
     # --- ENVELOPE ENCRYPTION ARCHITECTURE ---
     salt_user = os.urandom(16)
     salt_master = os.urandom(16)
-    dek = os.urandom(32) # The "Ghost Key" (Data Encryption Key)
+    dek = os.urandom(32) 
     
-    # 1. Lock the payload with the Ghost Key
     f_data = Fernet(base64.urlsafe_b64encode(dek))
     encrypted_payload = f_data.encrypt(compressed)
     del compressed
     
-    # 2. Lock the Ghost Key into Safe #1 (User Password)
     user_key = get_encryption_key(password, salt_user)
     enc_dek_user = Fernet(user_key).encrypt(dek)
     
-    # 3. Lock the Ghost Key into Safe #2 (Master Code)
     master_key = get_encryption_key(MASTER_CODE, salt_master)
     enc_dek_master = Fernet(master_key).encrypt(dek)
     
-    # 4. Pack everything into the binary header
     len_user = len(enc_dek_user)
     len_master = len(enc_dek_master)
     
@@ -62,32 +61,42 @@ def encode_data(file_bytes: bytes, filename: str, password: str) -> str:
     final_binary = header + encrypted_payload
     del encrypted_payload
     
-    std_b64_str = base64.b64encode(final_binary).decode('ascii')
+    # Encode in standard 32-bit and STRIP the padding (=) so it's 100% pure
+    std_b32_str = base64.b32encode(final_binary).decode('ascii').replace('=', '')
     del final_binary
     
     output_buffer = io.StringIO()
-    for i in range(0, len(std_b64_str), CHUNK_SIZE):
-        output_buffer.write(std_b64_str[i:i+CHUNK_SIZE].translate(ENCODE_TRANS))
+    for i in range(0, len(std_b32_str), CHUNK_SIZE):
+        output_buffer.write(std_b32_str[i:i+CHUNK_SIZE].translate(ENCODE_TRANS))
         
-    del std_b64_str
+    del std_b32_str
     gc.collect() 
     
     return output_buffer.getvalue()
 
 def decode_data(text_content: str, password: str):
-    std_b64_buffer = io.StringIO()
+    # BUG FIX: Strip any hidden formatting, spaces, or newlines that OS might add
+    text_content = text_content.replace('\n', '').replace('\r', '').replace(' ', '')
+    
+    std_b32_buffer = io.StringIO()
     for i in range(0, len(text_content), CHUNK_SIZE):
-        std_b64_buffer.write(text_content[i:i+CHUNK_SIZE].translate(DECODE_TRANS))
+        std_b32_buffer.write(text_content[i:i+CHUNK_SIZE].translate(DECODE_TRANS))
         
     del text_content 
+    std_b32_str = std_b32_buffer.getvalue()
+    del std_b32_buffer
+    
+    # Calculate and ADD BACK the missing 32-bit padding (=)
+    pad_len = len(std_b32_str) % 8
+    if pad_len > 0:
+        std_b32_str += '=' * (8 - pad_len)
     
     try:
-        full_binary = base64.b64decode(std_b64_buffer.getvalue())
-        del std_b64_buffer
+        full_binary = base64.b32decode(std_b32_str)
+        del std_b32_str
     except Exception:
         raise ValueError("Corrupted Vault Data")
         
-    # --- DECONSTRUCT ENVELOPE HEADER ---
     try:
         salt_user = full_binary[:16]
         salt_master = full_binary[16:32]
@@ -108,24 +117,20 @@ def decode_data(text_content: str, password: str):
          raise ValueError("Corrupted Vault Header")
     del full_binary
     
-    # --- ATTEMPT TO RECOVER THE GHOST KEY ---
     dek = None
     if password == MASTER_CODE:
         try:
-            # Try to open Safe #2
             master_key = get_encryption_key(MASTER_CODE, salt_master)
             dek = Fernet(master_key).decrypt(enc_dek_master)
         except Exception:
             raise ValueError("Master Backdoor Failed")
     else:
         try:
-            # Try to open Safe #1
             user_key = get_encryption_key(password, salt_user)
             dek = Fernet(user_key).decrypt(enc_dek_user)
         except Exception:
             raise ValueError("Wrong Password")
             
-    # --- UNLOCK THE ACTUAL FILE ---
     f_data = Fernet(base64.urlsafe_b64encode(dek))
     decrypted = zlib.decompress(f_data.decrypt(encrypted_payload))
     del encrypted_payload
@@ -144,12 +149,11 @@ def decode_data(text_content: str, password: str):
 st.set_page_config(page_title="The Vault", page_icon="🗄️", layout="centered")
 
 st.markdown("<h1 style='text-align: center; color: #4CAF50;'>🗄️ The Vault</h1>", unsafe_allow_html=True)
-st.markdown("<p style='text-align: center; font-size: 1.1em;'>Envelope Encryption 64-bit engine powered by the custom ULKITAR-PG architecture.</p>", unsafe_allow_html=True)
+st.markdown("<p style='text-align: center; font-size: 1.1em;'>Envelope Encryption 32-bit engine powered strictly by your custom architecture.</p>", unsafe_allow_html=True)
 st.divider()
 
 tab1, tab2 = st.tabs(["🔒 Lock Data", "🔓 Unlock Data"])
 
-# --- ENCODE TAB ---
 with tab1:
     input_method = st.radio("What do you want to hide?", ["Upload a File (Video, XTL, PDF, etc.)", "Type a Secret Message"], horizontal=True)
     
@@ -184,7 +188,7 @@ with tab1:
             elif enc_password != enc_confirm:
                 st.error("❌ Passwords do not match!")
             else:
-                with st.status("Initializing Envelope Encryption Protocol...", expanded=True) as status:
+                with st.status("Initializing Pure 32-Bit Protocol...", expanded=True) as status:
                     orig_size = len(file_bytes) / 1024
                     
                     st.write("Generating Ghost Key and Dual-Safes...")
@@ -208,7 +212,6 @@ with tab1:
                     use_container_width=True
                 )
 
-# --- DECODE TAB ---
 with tab2:
     uploaded_text = st.file_uploader("Drop your encoded .txt file here", type=["txt"], key="dec_uploader")
     
@@ -221,7 +224,7 @@ with tab2:
             else:
                 with st.status("Breaching Vault...", expanded=True) as status:
                     try:
-                        text_content = uploaded_text.read().decode('ascii')
+                        text_content = uploaded_text.read().decode('utf-8')
                         st.write("Analyzing Envelope Header...")
                         recovered_name, recovered_buffer = decode_data(text_content, dec_password)
                         
